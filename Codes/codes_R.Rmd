@@ -1,1 +1,981 @@
+---
+title: "Datathon UNHCR"
+output: html_document
+author: ""
+date: "2025-04-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Set the working repository
+setwd("/UNHCR")
+```
+
+
+
+```{r, results='hide'}
+#Load the packages 
+
+library(dplyr)
+library(haven)
+library(randomForest)
+library(caret)
+library(ggplot2)
+library(vip)       
+library(iml)  
+library(rpart)
+library(rpart.plot)
+library(fixest)
+library(glmnet)
+library(sandwich)
+library(lme4)
+library(lmtest)
+library(FactoMineR)
+library(factoextra)
+library(reshape2)
+library(stargazer)
+library(broom)
+library(stringr)
+library(grf)
+library(corrplot)
+library(gridExtra)
+library(purrr)
+library(patchwork)
+library(hstats)
+
+```
+
+
+```{r}
+set.seed(22)
+```
+
+
+```{r}
+# Load the data
+uganda2018 <- read_dta("../Data/Uganda2018/UGA_JMSNA_2018_Anonymized.dta")
+```
+
+
+```{r}
+# Convert all columns of type 'character' to 'factor'
+uganda2018[] <- lapply(uganda2018, function(x) if(is.character(x)) as.factor(x) else x)
+
+```
+
+# Data processing
+
+```{r}
+# creation of "vulnerable" variable
+uganda2018=uganda2018 %>% mutate(vulnerables=ifelse((orphan!="0" & orphan!="")|(unaccompanied_minor!="0" & unaccompanied_minor!="")|(unaccompanied_minor!="0" & unaccompanied_minor!="")|                             (separated_minor!="0" & separated_minor!="")|                                                   (chronic_ill!="0" & chronic_ill!="")|(disabled!="0" & disabled!="")|                                    (chronic_ill!="0" & chronic_ill!=""),1,0))
+
+table(uganda2018$vulnerables, uganda2018$respondent_type)
+
+```
+
+
+```{r}
+# Processing the health data used of the index creation
+uganda2018=uganda2018 %>% mutate(young_child_diarrhoea_rec=ifelse(young_child_diarrhoea=="yes",-1,                                                         ifelse(young_child_diarrhoea=="no",1,0)))
+
+uganda2018=uganda2018 %>% mutate(child_diarrhoea_rec=ifelse(child_diarrhoea=="yes",-1,
+                                                                ifelse(child_diarrhoea=="no",1,0)))
+
+uganda2018=uganda2018 %>% mutate(polio_vaccine_rec=ifelse(polio_vaccine=="yes_saw_card"|polio_vaccine=="yes_without_card ",1,  ifelse(polio_vaccine=="no",-1,0)))
+
+
+uganda2018=uganda2018 %>% mutate(measles_vaccine_rec=ifelse(measles_vaccine=="yes_saw_card"|measles_vaccine=="yes_without_card ",1,  ifelse(measles_vaccine=="no",-1,0)))
+
+uganda2018=uganda2018 %>% mutate(vitamin_supplement_rec=ifelse(vitamin_supplement=="yes",1,
+                                                                ifelse(vitamin_supplement=="no",-1,0)))
+
+uganda2018=uganda2018 %>% mutate(treated_nets_rec=ifelse(treated_nets=="yes",1,
+                                                                ifelse(treated_nets=="no",-1,0)))
+
+```
+
+
+```{r}
+uganda2018=uganda2018 %>% mutate(registration_rec=ifelse(registration=="yes",1,                                                         ifelse(registration=="no",0,NA)))
+```
+
+
+```{r}
+# Recode Wash variables
+uganda2018=uganda2018 %>% mutate(latrine_access=ifelse(latrine_access=="no_answer","all_members",latrine_access))
+
+uganda2018$latrine_access[uganda2018$latrine_access == "no_answer"] <- "all_members"
+
+uganda2018=uganda2018 %>% mutate(latrine_access_rec=ifelse(latrine_access=="4",0,1) )
+
+uganda2018=uganda2018 %>% mutate(soap_rec=ifelse(soap=="no",0,1) )
+
+uganda2018 <- uganda2018 %>% 
+  mutate(  no_latrn_acces_child = ifelse(
+      no_latrn_acces_who_female_child == 1 | no_latrn_acces_who_male_child == 1, 
+      1,   ifelse(  no_latrn_acces_who_female_child == 0 & no_latrn_acces_who_male_child == 0,       0,         NA      )    )  )
+
+table(uganda2018$adequate_water)
+table(uganda2018$soap_rec)
+table(uganda2018$latrine_access_rec)
+table(uganda2018$no_latrn_acces_child)
+table(uganda2018$handwash_dirty_hands)
+```
+
+
+
+
+```{r}
+# Recode Food variables
+
+uganda2018=uganda2018 %>% mutate(main_food_source_rec=ifelse(main_food_source=="own_production",1,0) )
+
+table(uganda2018$main_food_source_rec)
+
+uganda2018$sufficient_food[uganda2018$sufficient_food=="no_answer"] <- "no"
+table(uganda2018$sufficient_food)
+
+uganda2018$fruits <- pmin(uganda2018$orange_fruits + uganda2018$other_fruits, 7)
+uganda2018 <- uganda2018 %>% mutate(fruits=ifelse(fruits>3,1,0))
+
+uganda2018$cereals_tubers <- pmin(uganda2018$cereals + uganda2018$tubers, 7)
+uganda2018 <- uganda2018 %>% mutate(cereals_tubers=ifelse(cereals_tubers>3,1,0))
+
+uganda2018$vegetables <- pmin(uganda2018$green_vegetables + uganda2018$orange_vegetables+uganda2018$other_vegetables, 7)
+uganda2018$vegetables[is.na(uganda2018$vegetables)] <- 0
+uganda2018 <- uganda2018 %>% mutate(vegetables=ifelse(vegetables>3,1,0))
+
+uganda2018$protein <- pmin(uganda2018$fish + uganda2018$meat+uganda2018$eggs+uganda2018$offal, 7)
+uganda2018 <- uganda2018 %>% mutate(protein=ifelse(protein>3,1,0))
+
+table(uganda2018$cereals_tubers_rec)
+table(uganda2018$fruits_rec)
+summary(uganda2018$vegetables)
+table(uganda2018$protein)
+```
+
+
+```{r}
+# Recode Environment variables
+uganda2018$kitchen_set[uganda2018$kitchen_set=="no_answer"] <- "yes"
+
+table(uganda2018$kitchen_set)
+
+uganda2018=uganda2018 %>% mutate(shelter_type_rec=ifelse(shelter_type=="concrete_brick"|shelter_type=="mud_brick",1,0) )
+table(uganda2018$shelter_type_rec)
+
+uganda2018$shelter_flooding[uganda2018$shelter_flooding=="no_answer"] <- "no"
+table(uganda2018$shelter_flooding)
+
+uganda2018$shelter_leaking[uganda2018$shelter_leaking=="no_answer"] <- "no"
+table(uganda2018$shelter_leaking)
+```
+
+
+```{r}
+# Recode Security variables
+uganda2018$child_violence[uganda2018$child_violence=="no_answer"] <- "no"
+uganda2018$child_violence[uganda2018$child_violence==""] <- NA
+
+table(uganda2018$child_violence)
+
+uganda2018$security[uganda2018$security=="no_answer"] <- "good"
+uganda2018$security[uganda2018$security=="very_poor"] <- "poor"
+table(uganda2018$security)
+
+uganda2018$refugee_relations[uganda2018$refugee_relations=="no_answer"] <- "good"
+uganda2018$refugee_relations[uganda2018$refugee_relations=="no_relations"] <- "poor"
+uganda2018$refugee_relations[uganda2018$refugee_relations=="very_poor"] <- "poor"
+table(uganda2018$refugee_relations)
+
+uganda2018$host_relations[uganda2018$host_relations=="no_answer"] <- "good"
+uganda2018$host_relations[uganda2018$host_relations=="no_relations"] <- "poor"
+uganda2018$host_relations[uganda2018$host_relations=="very_poor"] <- "poor"
+table(uganda2018$host_relations)
+
+table(uganda2018$child_support_training)
+```
+
+
+# Creation of the composite indicator
+
+
+```{r}
+# Extract health data
+df_sante <- uganda2018 %>% 
+  select(young_child_diarrhoea_rec, child_diarrhoea_rec, polio_vaccine_rec, measles_vaccine_rec, vitamin_supplement_rec, treated_nets_rec)
+
+```
+
+
+```{r}
+# The PCA
+acp_sante <- PCA(df_sante)
+summary(acp_sante)
+```
+
+
+```{r}
+# Visualization of explained variance
+fviz_screeplot(acp_sante)
+
+# Visualize individuals on the first two dimensions
+fviz_mca_ind(acp_sante, label = "none")
+
+# Visualize the variables on the first two dimensions
+fviz_mca_var(acp_sante, axes=c(1,2))
+
+```
+
+
+```{r}
+# Extract the coordinates (scores) of the variables
+coord_var <- abs(acp_sante$va$coord)
+
+# Column-by-column normalization
+coord_var_norm <- sweep(coord_var, 2, colSums(coord_var), FUN = "/")
+
+# Calculation of the index on each axis
+I1=0
+I2=0
+
+for(j in 1:length(df_sante)){
+      I1[j]=coord_var_norm[j,1]*df_sante[,j]
+      I2[j]=coord_var_norm[j,2]*df_sante[,j]
+
+  }
+I1=as.data.frame(I1)
+I2=as.data.frame(I2)
+I1_sum=rowSums(I1)
+I2_sum=rowSums(I2)
+
+# The composite index
+I=(acp_sante$eig[1,1]*I1_sum + acp_sante$eig[2,1]*I2_sum)/(acp_sante$eig[1,1] + acp_sante$eig[2,1])
+
+# Normalization of the composite index
+I_norm=(I-min(I))/(max(I)-min(I))
+summary(I_norm)
+```
+
+```{r}
+# The composite index's distribution
+hist(I_norm, breaks = 50)
+```
+
+
+```{r}
+# The autocorrelation matrix to see the correlation of the indicator with the variables from which it is calculated
+df_corr <- cbind(I_norm, df_sante)
+matrice_corr <- cor(df_corr, use = "complete.obs", method = "pearson") 
+
+corrplot(matrice_corr, method = "color", type = "upper", tl.cex = 0.8, addCoef.col = "black")
+```
+
+# Descriptive statistics
+
+```{r}
+uganda2018$I_norm=I_norm
+
+uganda2018 %>% group_by(respondent_type) %>% summarise(avg=mean(I_norm, na.rm = T))
+boxplot(uganda2018$I_norm~ uganda2018$respondent_type)
+
+
+```
+```{r}
+
+table(uganda2018$respondent_type, uganda2018$vulnerables)
+graph = uganda2018 %>% group_by(respondent_type, vulnerables) %>% summarise(avg=mean(I_norm, na.rm = T),
+                                                                    sd = sd(I_norm, na.rm = T))
+
+#Average health index by respondent type and vulnerability status
+graph1 <- ggplot(graph, aes(x = factor(vulnerables, levels = c(0, 1), labels = c("No", "Yes")),
+                            y = avg, fill = respondent_type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9), width = 0.7) +
+  geom_errorbar(aes(ymin = avg - sd, ymax = avg + sd),
+                position = position_dodge(width = 0.9),
+                width = 0.2) +
+  labs(
+    x = "Vulnerability",
+    y = "Health index",
+    fill = "Respondent Type",
+    title = "Average health index by respondent type and vulnerability status"
+  ) +
+  theme_minimal(base_size = 14) +
+  scale_fill_brewer(palette = "Set2")
+
+print(graph1)
+
+# Health index density by respondent type
+graph2 <- ggplot(uganda2018, aes(x = I_norm, fill = respondent_type, color = respondent_type)) +
+  geom_density(alpha = 0.2, linewidth = 0.5) +  
+  labs(
+    x = "Vulnerability",
+    y = "Health index",
+    fill = "Respondent Type",
+    title = "Average health index by respondent type and vulnerability status"
+  ) +
+  scale_fill_manual(values = c("host community" = "lightgreen", "refugee" = "darkred")) +
+  scale_color_manual(values = c("host community" = "lightgreen", "refugee" = "darkred")) +
+  theme_minimal(base_size = 10)
+
+print(graph2)
+
+```
+
+
+```{r}
+uganda2018 %>% group_by(hh_size) %>% summarise(avg=mean(I_norm, na.rm = T))
+boxplot(uganda2018$I_norm~ uganda2018$hh_size)
+
+uganda2018 %>% group_by( num_children) %>% summarise(avg=mean(I_norm, na.rm = T))
+boxplot(uganda2018$I_norm~ uganda2018$num_children)
+
+```
+
+
+```{r}
+uganda2018 %>% group_by(vulnerables) %>% summarise(avg=mean(I_norm, na.rm = T))
+boxplot(uganda2018$I_norm~ uganda2018$vulnerables)
+
+```
+
+
+
+```{r}
+uganda2018 %>% group_by(registration) %>% summarise(avg=mean(I_norm, na.rm = T))
+boxplot(uganda2018$I_norm~ uganda2018$registration)
+
+```
+
+
+
+```{r}
+uganda2018 %>% group_by(num_children) %>% summarise(avg=mean(I_norm, na.rm = T))
+boxplot(uganda2018$I_norm~ uganda2018$num_children)
+```
+
+
+
+#Clustering de l'indicateur
+
+```{r}
+set.seed(22) 
+
+# clustering in two groups with Kmeans
+kmeans_res <- kmeans(uganda2018$I_norm, centers = 2) 
+summary(kmeans_res)
+
+uganda2018$cluster <- as.factor(kmeans_res$cluster)
+uganda2018$cluster <- factor(uganda2018$cluster,
+                                  levels = c(1, 2),
+                                  labels = c("Poor Health", "Good Health"))
+
+```
+
+
+```{r}
+# Visualize the distribution of the health index by cluster
+ggplot(uganda2018, aes(x = cluster, y = I_norm, fill = cluster)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Health Index by Health Status",
+       x = "Health Status",
+       y = "Health Index")
+```
+
+```{r}
+uganda2018 %>% 
+  group_by(cluster) %>% 
+  summarise(
+    mean = mean(I_norm, na.rm = TRUE),
+    sd = sd(I_norm, na.rm = TRUE),
+    median = median(I_norm, na.rm = TRUE),
+    min = min(I_norm, na.rm = TRUE),
+    max = max(I_norm, na.rm = TRUE)
+  )
+
+summary(uganda2018$I_norm[uganda2018$cluster=="Poor Health"])
+summary(uganda2018$I_norm[uganda2018$cluster=="Good Health"])
+
+prop.table(table(uganda2018$cluster))
+```
+
+
+
+
+# Construction of  an index per dimension
+
+```{r}
+# EDUCATION
+school_attendance <- uganda2018 %>%
+  select(starts_with("skool_barier")) %>%
+  mutate(school_attendance = if_all(everything(), is.na))
+uganda2018$school_attendance = school_attendance$school_attendance
+
+table(uganda2018$school_attendance)
+prop.table(table(uganda2018$school_attendance, uganda2018$respondent_type))
+
+##WASH: "latrine_access_rec",  "adequate_water", handwash_dirty_hands", "soap_rec", "no_latrn_acces_child"
+
+table(uganda2018$adequate_water)
+
+uganda2018 <- uganda2018 %>%
+  mutate(
+    adequate_water_rec = ifelse(adequate_water == "yes", 1, 0),
+    latrn_acces_child = ifelse(no_latrn_acces_child == 1, 0, 1)
+  ) %>%
+  mutate(
+    wash_index = rowMeans(select(., c(
+      latrine_access_rec,
+      adequate_water_rec,
+      handwash_dirty_hands,
+      soap_rec,
+      latrn_acces_child
+    )), na.rm = TRUE) )
+table(uganda2018$wash_index)
+
+ ## FOOD: "main_food_source_rec", "sufficient_food", "fruits","protein", "vegetables", "cereals_tubers"
+table(uganda2018$cereals_tubers)
+uganda2018 <- uganda2018 %>%
+  mutate(
+    sufficient_food_rec = ifelse(sufficient_food == "yes", 1, 0)) %>%
+  mutate(
+    food_index = rowMeans(select(., c(
+      main_food_source_rec,
+      sufficient_food_rec,
+      fruits,
+      protein,
+      vegetables,
+      cereals_tubers)), na.rm = TRUE) )
+table(uganda2018$food_index)
+
+#### ENVIRONNEMENT: "shelter_type_rec",   "shelter_flooding", "shelter_leaking", "kitchen_set"
+table(uganda2018$shelter_flooding)
+typeof(uganda2018$shelter_flooding)
+uganda2018 <- uganda2018 %>%
+  mutate(
+    shelter_flooding_rec = ifelse(shelter_flooding=="no",1,0),
+    shelter_leaking_rec = ifelse(as.factor(shelter_leaking) == "yes", 0, 1),
+    kitchen_set_rec = ifelse(kitchen_set == "yes", 1, 0)) %>%
+  mutate(
+    environnment_index = rowMeans(select(., c(
+      shelter_type_rec,
+      shelter_flooding_rec,
+      shelter_leaking_rec,
+      kitchen_set_rec)), na.rm = TRUE) )
+table(uganda2018$environnment_index)
+
+uganda2018=uganda2018 %>% mutate(arrival_year_rec = ifelse(arrival_year>=2016,1,0))
+
+uganda2018=uganda2018 %>% mutate(arrival_year_rec = ifelse(is.na(arrival_year_rec),1,0))
+```
+
+```{r}
+vars_selected <- c("school_attendance","wash_index", "food_index", "environnment_index", "registration", "vulnerables", "hh_size", "num_children", "born_uganda_number", "arrival_year_rec", "cluster")
+
+df_acm <- uganda2018 %>% subset(respondent_type=="refugee") %>% 
+  select(all_of(vars_selected)) %>%
+  mutate(across(everything(), as.factor))  
+
+```
+
+
+```{r}
+# The MCA for the clustering
+acm_res <- MCA(df_acm, graph = FALSE)
+
+```
+
+
+
+```{r}
+# Individuals graph
+fviz_mca_ind(acm_res,
+             label = "none", 
+             habillage = "cluster",
+             palette = c("brown", "chartreuse4"),
+             addEllipses = TRUE, 
+             ggtheme = theme_minimal(),
+             title = "MCA by health status")
+
+```
+
+```{r}
+# Variables graph
+fviz_mca_var(acm_res, 
+             repel = TRUE, 
+             ggtheme = theme_minimal(),
+             title = "MCA for variables")
+```
+
+#Randomforest
+
+```{r}
+# Compute the interactions variables
+uganda2018 <- uganda2018 %>% 
+  mutate(
+    wash_food = wash_index*food_index,
+    wash_env = wash_index*environnment_index,
+    food_env = food_index*environnment_index,
+    school_legal = interaction(school_attendance, registration)
+  )
+
+```
+
+
+
+```{r}
+vars_selected <- c("vulnerables", 
+                         "hh_size", "num_children", "born_uganda", "arrival_year_rec",  "wash_index", "food_index", "environnment_index", "school_legal", "food_env", "wash_env", "wash_food" )
+
+
+rf_data <- uganda2018 %>%
+  select("vulnerables", 
+         "hh_size", "num_children",  "arrival_year_rec",   
+         "cluster", "wash_index", "food_index", "environnment_index", 
+         "school_attendance","registration", "born_uganda", "food_env", "wash_env", "wash_food")
+
+# Partition in train and test sets
+trainIndex <- createDataPartition(rf_data$cluster, p = 0.85, list = FALSE)
+train_data <- rf_data[trainIndex, ]
+test_data <- rf_data[-trainIndex, ]
+
+mtry_values <- 2:6
+ntree_values <- c(300, 400)
+
+results <- expand.grid(mtry = mtry_values, ntree = ntree_values)
+results$error <- NA
+
+# Hyperparameters tunning
+for (i in 1:nrow(results)) {
+  model <- randomForest(cluster ~ ., 
+                        data = train_data, 
+                        mtry = results$mtry[i], 
+                        ntree = results$ntree[i])
+  results$error[i] <- mean(predict(model, train_data) != train_data$cluster)
+}
+
+best_params <- results[which.min(results$error), ]
+
+
+final_rf <- randomForest(cluster ~ ., 
+                         data = train_data, 
+                         mtry = best_params$mtry, 
+                         ntree = best_params$ntree,
+                         importance = TRUE)
+
+predict_rf <- function(object, newdata) {
+  predict(object, newdata = newdata, type = "prob")
+}
+
+X <- rf_data[, setdiff(names(rf_data), "cluster")]
+
+# Calculate the interactions
+# hstat_obj <- hstats::hstats(
+#   object = final_rf,
+#   X = X,
+#   pred_fun = predict_rf
+# )
+# 
+# interactions_df <- h2_overall(hstat_obj, normalize = FALSE, squared = FALSE, zero = FALSE)
+# 
+# 
+# 
+# interaction_values <- interactions_df$M
+# 
+# interaction_names <- rownames(interactions_df)
+# 
+# interactions_sorted <- data.frame(
+#   interaction = interaction_names,
+#   H = interaction_values
+# )
+# 
+# interactions_sorted <- interactions_sorted[order(-interactions_sorted$H.Good.Health), ]
+
+
+```
+
+
+```{r}
+# 
+# ggplot(interactions_sorted, aes(x = reorder(interaction, H.Good.Health), y = H.Poor.Health)) +
+#   geom_col(fill = "darkorange") +
+#   coord_flip() +
+#   labs(
+#     title = " Friedman's interactions-statistics",
+#     x = "Variables",
+#     y = "H-statistic"
+#   ) +
+#   theme_minimal()
+
+```
+
+
+
+```{r}
+# Predictions on the test set
+predictions <- predict(final_rf, newdata = test_data)
+accuracy <- mean(predictions == test_data$cluster)
+cat("Accuracy on the test set :", round(accuracy * 100, 2), "%\n")
+
+```
+
+
+```{r}
+importance(final_rf)
+```
+
+
+
+
+
+```{r}
+
+# 1. Variables à mettre en évidence
+highlight_vars <- c("wash_food", "food_env", "wash_env")
+
+# 2. Préparer les données
+var_importance <- as.data.frame(importance(final_rf))
+var_importance$Variable <- rownames(var_importance)
+var_importance <- var_importance %>%
+  mutate(highlight = ifelse(Variable %in% highlight_vars, "With interaction", "No interaction")) %>%
+  arrange(desc(MeanDecreaseGini))
+
+# 3. Graphique avec couleurs personnalisées
+ggplot(var_importance, aes(x = reorder(Variable, MeanDecreaseGini), 
+                           y = MeanDecreaseGini,
+                           fill = highlight)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = round(MeanDecreaseGini, 1)),
+            hjust = -0.1, size = 3.5, color = "black") +
+  scale_fill_manual(values = c("With interaction" = "#CC5500",   # rouge doux/orangé
+                               "No interaction" = "#1E7FCB")) +             # bleu classique
+  coord_flip() +
+  theme_minimal(base_size = 13) +
+  theme(legend.title = element_blank(),
+        legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 11)) +
+  labs(title = "Variables importance",
+       x = NULL,
+       y = "Mean Decrease Gini")
+
+```
+
+
+```{r}
+partial_dep(
+  final_rf, 
+  v = "wash_index", 
+  X = X, 
+  BY = "food_index", 
+  pred_fun = predict_rf
+) |> 
+  plot()
+
+partial_dep(
+  final_rf, 
+  v = "wash_index", 
+  X = X, 
+  BY = "environnment_index", 
+  pred_fun = predict_rf
+) |> 
+  plot()
+
+partial_dep(
+  final_rf, 
+  v = "food_index", 
+  X = X, 
+  BY = "environnment_index", 
+  pred_fun = predict_rf
+) |> 
+  plot()
+
+```
+
+# REGRESSION
+
+```{r}
+model_data <- uganda2018 %>% subset(respondent_type=="refugee")
+```
+
+```{r}
+table(uganda2018$I_norm,uganda2018$hh_member_earning)
+uganda2018=uganda2018 %>% mutate(arrival_year_rec = ifelse(arrival_year>=2016,1,0))
+uganda2018=uganda2018 %>% mutate(arrival_year_rec = ifelse(arrival_year>=2016,1,0))
+
+
+# LINEAR REGRESSION
+model1 <- lm( I_norm ~  wash_index + food_index+school_attendance + environnment_index+ registration_rec , data = uganda2018)
+coeftest(model1, vcov = vcovHC(model1, type = "HC1"))
+summary(model1)
+
+model2 <- lm( I_norm ~  wash_index + food_index+school_attendance + environnment_index+ registration_rec+ hh_size+ num_children+ arrival_year_rec +child_violence+security+refugee_relations+host_relations, data = uganda2018)
+coeftest(model2, vcov = vcovHC(model2, type = "HC1"))
+summary(model2)
+
+model3 <- lm( I_norm ~ school_attendance + registration_rec +latrine_access_rec+adequate_water_rec+handwash_dirty_hands+soap_rec+ latrn_acces_child+ main_food_source_rec+ sufficient_food_rec+fruits+ protein+vegetables+ cereals_tubers +vulnerables+ hh_size+ num_children+ arrival_year_rec+ child_violence+security+refugee_relations+host_relations, data = uganda2018)
+coeftest(model3, vcov = vcovHC(model3, type = "HC1"))
+summary(model3)
+```
+
+```{r}
+table(uganda2018$security)
+
+### REGRESSION WITH SETTLMENTS FIXED EFFECTS AND STANDARDS ERROS CLUSTER
+model_fe1 <- feols(
+  I_norm ~  wash_index + food_index+school_attendance + environnment_index+ registration_rec | district,
+  data = uganda2018,
+  cluster = ~settlement )
+summary(model_fe1)
+
+model_fe2 <- feols(
+  I_norm ~  wash_index + food_index+school_attendance + environnment_index+ registration_rec +  hh_size+ num_children+ arrival_year_rec +child_violence+security+refugee_relations+host_relations + born_uganda_number+hh_member_earning+ sex_hh_head | district,
+  data = uganda2018,
+  cluster = ~settlement )
+summary(model_fe2)
+
+etable(model_fe1, model_fe2, tex=T )
+```
+
+
+```{r}
+stargazer(model1, model2,
+          type = "latex",
+          #coef.names = c("Wash index", "Food index", "Attending school", "Registred legal"),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          title = "Effects on children health index", 
+          style = "default",
+          keep = c(1:6),
+          dep.var.labels = c("Health Index"), 
+          add.lines = list(c("Controls added", "No", "Yes"), 
+                           c("Fixed effects", "Yes", "Yes")),
+          column.sep.width = "1pt",
+          note=c(" The dependent variable is a standardized health index for children. Column (1) includes no additional controls. Column (2) includes controls for child and household characteristics. Wash index,food index,school attendance are standardized indices or indicators. Registration rec refers to whether the child is registered in official records. The model includes a settlement fixed effects, Robust standard errors clustered at settlement in parentheses"),
+          out = "impact_reg_simple.tex")
+
+
+etable(model_fe1, model_fe2,
+  se.below = TRUE,  #
+  tex = TRUE,
+  title = "Effects on Children Health Index",
+  keep = c(
+    "wash_index",
+    "food_index",
+    "school_attendance",
+    "environnment_index",
+    "registration_rec"),
+  headers = "Health Index",
+  notes = c(
+    "The dependent variable is a standardized health index for children.",
+    "Column (1) includes no additional controls. Column (2) includes controls for child and household characteristics.",
+    "The model includes settlement fixed effects.",
+    "Robust standard errors clustered at settlement level in parentheses."
+  ),
+  file = "impact_reg_1.tex"
+)
+```
+
+```{r}
+model_fe2 <- feols(
+  I_norm ~  wash_index + food_index+school_attendance + environnment_index+ registration_rec +  hh_size+ num_children+ arrival_year_rec +child_violence+security+refugee_relations+host_relations + born_uganda_number+hh_member_earning+ sex_hh_head | district,
+  data = model_data,
+  cluster = ~settlement )
+
+coeff <- as.data.frame(coef(model_fe2))
+colnames(coeff) <- "estimate"
+coeff$term <- rownames(coeff)
+
+robust_se <- as.data.frame(se(model_fe2))
+colnames(robust_se) <- "std.error"
+robust_se$term <- rownames(robust_se)
+
+# Merge estimates and robust SEs
+tidy_robust <- merge(coeff, robust_se, by = "term")
+
+# Clean term labels for nicer plot labels
+tidy_robust <- tidy_robust %>%
+  filter(term %in% c("wash_index", "food_index", "school_attendanceTRUE", 
+                     "environnment_index", "registration_rec")) %>% 
+  mutate(term = recode(term,
+                       "wash_index" = "Wash Index",
+                       "food_index" = "Food Index",
+                       "school_attendanceTRUE" = "Attending School",
+                       "environnment_index" = "Environment Index",
+                       "registration_rec" = "Legal Registration"))
+tidy_robust=tidy_robust %>% 
+  mutate(
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error
+  ) 
+# Plot forest-style coefficient graph
+ggplot(tidy_robust, aes(x = estimate, y = reorder(term, estimate))) +
+  geom_point(color = "#00BFC4", size = 2.5) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "#00BFC4") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+  theme_minimal(base_size = 13) +
+  labs(
+    x = "Coefficient Estimate (Cluster-Robust 95% CI)",
+    y = NULL,
+    title = "Effect of Different Dimensions on Child Health Index"
+  )
+
+```
+
+
+```{r}
+# Function: Run fixed effect model and extract clustered robust estimates
+get_robust_fe <- function(data, group_label) {
+  model <- feols(
+    I_norm ~ wash_index + food_index + school_attendance + environnment_index + registration_rec +  hh_size + num_children + arrival_year_rec + child_violence + security + 
+      refugee_relations + host_relations + born_uganda_number + hh_member_earning + sex_hh_head | district,
+    data = data,
+    cluster = ~settlement
+  )
+
+  # Extract coefficients and clustered SEs
+  coeff <- as.data.frame(coef(model))
+  colnames(coeff) <- "estimate"
+  coeff$term <- rownames(coeff)
+
+  robust_se <- as.data.frame(se(model))
+  colnames(robust_se) <- "std.error"
+  robust_se$term <- rownames(robust_se)
+
+  tidy_robust <- merge(coeff, robust_se, by = "term") %>%
+    mutate(
+      conf.low = estimate - 1.96 * std.error,
+      conf.high = estimate + 1.96 * std.error,
+      Group = group_label
+    )
+
+  return(tidy_robust)
+}
+
+table(uganda2018$sex_hh_head)
+results_vuln <- get_robust_fe(filter(model_data, sex_hh_head == "male"), "Head male")
+results_nonvuln <- get_robust_fe(filter(model_data, sex_hh_head == "female"), "Head Female")
+
+results_all <- bind_rows(results_vuln, results_nonvuln) %>%
+  filter(term %in% c("wash_index", "food_index", "school_attendanceTRUE", 
+                     "environnment_index", "registration_rec")) %>%
+  mutate(term = recode(term,
+                       "wash_index" = "Wash Index",
+                       "food_index" = "Food Index",
+                       "school_attendanceTRUE" = "Attending School",
+                       "environnment_index" = "Environment Index",
+                       "registration_rec" = "Legal Registration"))
+
+ggplot(results_all, aes(x = estimate, y = term, color = Group, shape = Group)) +
+  geom_point(position = position_dodge(width = 0.6), size = 2.8) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.2,
+                 position = position_dodge(width = 0.6)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Coefficient Estimate (Cluster-Robust 95% CI)",
+    y = NULL,
+    color = "Group",
+    shape = "Group",
+    title = "Effect of Key Factors on Child Health by Household head sex"
+  ) +
+  theme_minimal(base_size = 13) +
+  scale_color_manual(values = c("Head male" = "#F8766D", "Head Female" = "#00BFC4")) +
+  theme(panel.grid.major.y = element_blank())
+
+
+```
+
+
+
+```{r}
+
+# Function: Run model and extract robust estimates and do graph for the SIMPLE REG MODEL
+get_robust <- function(data, group_label) {
+  model <- lm( I_norm ~  wash_index + food_index+school_attendance + environnment_index+ registration_rec+ hh_size+ num_children+ arrival_year_rec +child_violence+security+refugee_relations+host_relations, data = data)
+
+  robust <- coeftest(model, vcov = vcovHC(model, type = "HC1")) %>%
+    tidy() %>%
+    filter(term != "(Intercept)") %>%
+    mutate(
+      conf.low = estimate - 1.96 * std.error,
+      conf.high = estimate + 1.96 * std.error,
+      Group = group_label
+    )
+  
+  return(robust)
+}
+
+# Get results by group
+results_vuln <- get_robust(filter(uganda2018, vulnerables == 1), "Vulnerable")
+results_nonvuln <- get_robust(filter(uganda2018, vulnerables == 0), "Non-vulnerable")
+
+# Combine
+results_all <- bind_rows(results_vuln, results_nonvuln) %>%
+  mutate(
+    term_clean = str_replace_all(term, "_", " "),
+    term_clean = str_to_title(term_clean)
+  )
+
+results_all = results_all %>% filter(term %in% c("wash_index", "food_index", "school_attendanceTRUE", "environnment_index","registration_rec" ))
+# Clean term labels if needed
+results_all = results_all %>% mutate(term = c("Wash index", "Food index", "Attending School", "Environnment index","Legal registration","Wash index", "Food index", "Attending School", "Environnment index","Legal registration" ))
+
+
+# Plot like the original example
+ggplot(results_all, aes(x = estimate, y = term, color = Group, shape = Group)) +
+  geom_point(position = position_dodge(width = 0.6), size = 2.8) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.2,
+                 position = position_dodge(width = 0.6)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    x = "Coefficient Estimate (with 95% CI)",
+    y = NULL,
+    color = "Group",
+    shape = "Group",
+    title = "Robust Regression Results by Vulnerability Status"
+  ) +
+  theme_minimal(base_size = 13) +
+  scale_color_manual(values = c("Vulnerable" = "#F8766D", "Non-vulnerable" = "#00BFC4")) +
+  theme(panel.grid.major.y = element_blank())
+
+
+```
+
+
+```{r}
+ggplot(uganda2018, aes(x = I_norm, y = food_index)) +
+  geom_point(color = "black", alpha = 0.2, size = 0.8) +
+  stat_smooth(aes(size = NA, fill = "90%"), alpha = 0.3, show.legend = TRUE, level = 0.90) +
+  stat_smooth(aes(size = NA, fill = "95%"), alpha = 0.2, show.legend = TRUE, level = 0.95) +
+  stat_smooth(aes(size = NA, fill = "99%"), alpha = 0.1, show.legend = TRUE, level = 0.99) +
+  stat_smooth(color = "black", size = 0.8, alpha = 0.6, se = FALSE, show.legend = TRUE) +
+  theme_classic() +
+  scale_fill_manual(
+    name = "Confidence Intervals", 
+    values = c("90%" = "gray12", "95%" = "gray12", "99%" = "gray12")
+    ) 
+```
+
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
 
